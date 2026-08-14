@@ -1,0 +1,20 @@
+{
+  "name": "secscan",
+  "version": "1.0.0",
+  "description": "零依赖 JS/TS 安全反模式静态扫描 CLI——代码健康 family 第七轴（eval/exec/TLS禁用/明文http/SQL拼接/弱随机）",
+  "bin": {
+    "secscan": "index.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "security",
+    "static-analysis",
+    "cli",
+    "zero-dependency",
+    "code-health",
+    "sast"
+  ],
+  "license": "MIT"
+}
