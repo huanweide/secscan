@@ -68,12 +68,12 @@ secscan ./src --max-high 0 --max-medium 5 --max-issues 10
 | ID | 严重度 | 检测内容 |
 |----|--------|----------|
 | S1 | high | `eval()` / `new Function()` 动态代码执行（RCE 风险） |
-| S2 | high | `child_process` 命令拼接（命令注入） |
+| S2 | high | `child_process` 命令内容不可控：字符串拼接 / 模板插值 / 变量实参（命令注入） |
 | S3 | high | TLS 证书验证被禁用（`rejectUnauthorized:false` / `NODE_TLS_REJECT_UNAUTHORIZED=0`） |
 | S4 | medium | 明文 `http://` 传输（建议改 HTTPS） |
 | S5 | medium | SQL 语句字符串拼接（SQL 注入） |
 | S6 | medium | `Math.random()` 用于安全上下文（token/secret/id/nonce 等） |
-| S7 | low | `child_process.exec` 常量命令（低风险，建议迁移 execFile） |
+| S7 | low | `child_process` 安全形态：纯静态常量命令，或 `execFile(cmd,[...])` 数组参数（不过 shell，无注入面） |
 
 ## 健康分
 
@@ -118,9 +118,16 @@ crypto.randomUUID();              // 安全随机，非 Math.random
 
 ```yaml
 # .github/workflows/security.yml
+- uses: actions/checkout@v4
+- uses: actions/setup-node@v4
+  with:
+    node-version: '20'
 - name: secscan
-  run: npx secscan ./src --fail-on-high --max-medium 0
+  run: node index.js ./src --fail-on-high --max-medium 0
 ```
+
+> **不要用 `npx secscan`。** npm 上的 `secscan` 是 Mozilla scanjs 的包（别人的项目），
+> 与本工具无关。直接用 `node index.js`，本项目零依赖、无需安装。
 
 ## License
 
@@ -132,9 +139,31 @@ MIT
 
 由 **ReTr · 樊斯瑞** 维护 · [GitHub 主页](https://github.com/huanweide)
 
-## CI 门禁用法
+## S2 / S7 按「实参形态」判严重度，而不是「首字符是不是引号」
 
-开箱即可接入 CI：在流水线中运行本工具，它会输出健康分与严重度；若存在不达标项会以非 0 退出码结束，从而拦下问题提交（具体参数见上方「快速开始」）。
+这是本工具最容易判反的地方，也是误报与漏报的共同来源。判定规则：
+
+| 写法 | 判定 | 理由 |
+| --- | --- | --- |
+| `exec('ls ' + x)` | **S2 high** | 字符串拼接，命令内容受输入影响 |
+| `execSync(`rm -rf ${p}`)` | **S2 high** | 模板插值，最危险的命令注入形态 |
+| `exec(userCmd)` | **S2 high** | 命令内容完全不可控 |
+| `execFile(cmd, [a, b])` | S7 low | 不经过 shell，数组参数无注入面 |
+| `exec('ls')` | S7 low | 纯静态常量 |
+
+同时**正则对象的 `.exec()` 不会被误判**（`re.exec(content)` 与 `cp.exec(x)` 靠点号前的标识符区分）。
+
+> 旧实现只看「首字符是不是引号」，而它的输入是已抹掉字符串的代码文本，
+> 于是把上面表格里的 high/low **全部判反**，且模板插值直接漏检。已修。
+
+## 测试
+
+```bash
+node --test test.js        # 13 项单测（含扩展名污染回归 + dogfood 归零）
+node scripts/smoke-cli.js  # 端到端断言
+```
+
+CI（`.github/workflows/verify.yml`）在 ubuntu + windows 双平台跑单测与冒烟。
 
 ## 赞助支持
 
