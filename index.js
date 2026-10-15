@@ -12,7 +12,13 @@ const path = require('path');
 
 const VERSION = '1.0.0';
 
-const SUPPORTED_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.vue', '.svelte']);
+// 默认扫描的扩展名。铁律：这是不可变的模块级常量，任何调用方都不得修改它。
+// 历史缺陷：run() 曾用 SUPPORTED_EXT.clear() 处理 --ext，等于改写模块级共享状态——
+// 编排入口（enghealth 等）同进程内先跑一次带 --ext 的调用后，后续所有调用都会
+// 静默漏扫其余扩展名，并照常输出「未发现问题」。安全扫描器谎报干净，后果极严重。
+// 现在 --ext 只作用于本次调用的局部集合。
+const DEFAULT_EXTENSIONS = Object.freeze(['.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.vue', '.svelte']);
+const SUPPORTED_EXT = new Set(DEFAULT_EXTENSIONS); // 仅用于兼容旧导出，勿修改
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'coverage', '.next', 'out',
   'vendor', '.cache', 'tmp', '.idea', '.vscode', 'bin', 'obj'
@@ -149,13 +155,54 @@ function scanText(src) {
 
   // S2 / S7 child_process exec 系列——仅在引用 child_process 的文件中标记。
   // 否则会误报正则对象的 .exec() 方法（如 re.exec(content)），这是最常见的误报源。
+  //
+  // 严重度判定铁律（按第一实参形态，而非「首字符是不是引号」）：
+  //   1) 字符串/模板字面量里含插值或拼接  -> S2 HIGH（命令注入，最危险形态）
+  //   2) 首参是完全静态的常量字面量    -> S7 low（审查即可，Node 自己也会警告）
+  //   3) 首参是变量 / 模板无插值         -> S2 HIGH（命令内容不可控）
+  //   4) 数组参数形式 execFile(cmd,[a,b]) -> 降为 S7 low（Node 不经过 shell，无注入面）
+  // 历史缺陷：旧实现只看 codeText 里首字符是否引号，而 codeText 已把字符串抹成空格，
+  //   于是 exec('ls '+x)（真危险）被判 low、execFile(cmd,[a])（安全）被判 high，
+  //   且模板插值 execSync(`rm -rf ${p}`) 直接漏检——恰好把最危险的形态判反了。
   const hasChildProcess = /require\s*\(\s*['"]child_process['"]\s*\)|from\s*['"]child_process['"]|import[^\n]*\bchild_process\b/.test(src);
   if (hasChildProcess) {
-    for (const m of codeText.matchAll(RE.exec)) {
-      const after = src.slice(m.index + m[0].length); // 用原始 src 保留字符串，判断首个实参是否字面量
-      if (/^\s*\)/.test(after)) continue; // 空参，跳过
-      const isConst = /^\s*['"`]/.test(after); // 首个实参是字符串字面量 = 常量命令
-      push(m.index, isConst ? 'S7' : 'S2');
+    // 必须在原始 src 上匹配调用位置：codeText 已把字符串抹成空格，
+    // 且 tokenizer 可能把 {...} 误判为正则字面量而多吞字符，导致两者索引不对齐
+    // （实测 {execSync} 解构写法会让偏移错 4 字符，模板串实参直接丢失）。
+    const rawExec = /\b(exec|execSync|execFile|execFileSync)\s*\(/g;
+    for (const m of src.matchAll(rawExec)) {
+      const callName = m[1];
+      // 区分「child_process 实例/命名空间的 .exec()」与「正则对象的 .exec()」：
+      //   cp.exec(x) / childProcess.exec(x)  ->  真调用，要判
+      //   re.exec(x) / pattern.exec(x)       ->  正则方法，与命令注入无关
+      // 判据：点号前是 cp / child_process / childProcess / spawn 之类才认；
+      // 裸 exec( 前若有标识符字符（re.exec）则跳过。
+      if (m.index > 0) {
+        const prev = src[m.index - 1];
+        if (prev === '.') {
+          const before = src.slice(Math.max(0, m.index - 30), m.index - 1);
+          if (!/\b(?:cp|child_process|childProcess|child|proc|proc2|nodeProcess)\s*$/.test(before)) continue;
+        } else if (/[.\w$]/.test(prev)) {
+          continue;
+        }
+      }
+      const rawAfter = src.slice(m.index + m[0].length);     // 原始 src，保留引号与插值
+      if (/^\s*\)/.test(rawAfter)) continue;                 // 空参，跳过
+
+      const usesArrayArgs = /\b(?:execFile|execFileSync)\b/.test(callName);
+      if (usesArrayArgs) {
+        // execFile/execFileSync 不经过 shell，数组参数形式无命令注入面
+        push(m.index, 'S7');
+        continue;
+      }
+
+      const firstArg = readFirstArg(rawAfter);
+      if (!firstArg) continue;                               // 解析不出实参，跳过（不谎报）
+      if (firstArg.dynamic) {
+        push(m.index, 'S2');                                 // 插值 / 拼接 / 变量
+      } else {
+        push(m.index, 'S7');                                 // 纯静态常量
+      }
     }
   }
 
@@ -208,8 +255,52 @@ function scanText(src) {
   return dedup;
 }
 
+// 读取 child_process 调用的第一个实参，判断其为「静态字面量」还是「动态」
+// 返回 { dynamic: boolean }；解析不出（空参 / 立即调用等）时返回 null
+function readFirstArg(after) {
+  const s = after.replace(/^\s+/, '');
+  const ch = s[0];
+  if (ch === "'" || ch === '"') {
+    // 普通字符串：找闭合引号（跳过转义），其后若紧跟 + 或 ${ 视区则是拼接 -> 动态
+    let i = 1;
+    while (i < s.length) {
+      if (s[i] === '\\') { i += 2; continue; }
+      if (s[i] === ch) break;
+      i++;
+    }
+    if (i >= s.length) return { dynamic: false };           // 未闭合，退化为静态（不谎报）
+    const rest = s.slice(i + 1);
+    if (/^\s*(?:\+|\$\{)/.test(rest)) return { dynamic: true }; // 'a' + x
+    if (/^\s*[,)]/.test(rest)) return { dynamic: false };        // 纯字面量
+    return { dynamic: true };
+  }
+  if (ch === '`') {
+    // 模板字面量：内部出现 ${...} 即为动态插值（最危险的命令注入形态）
+    const close = s.indexOf('`', 1);
+    const body = close === -1 ? s.slice(1) : s.slice(1, close);
+    return { dynamic: body.includes('${') };
+  }
+  if (ch === ')' || ch === ',') return null;                 // 无实参
+  // 变量 / 函数调用 / 表达式 —— 命令内容不可控
+  return { dynamic: true };
+}
+
+// dogfood 归零豁免：精确到「相对路径」，且必须同时满足「文件名是自身测试文件」
+// 这两条硬约束，避免把真实业务代码里的同名文件一并放过。
+// 背景：本工具的 dogfood 纪律要求扫描自身仓库归零，而 test.js / smoke-cli.js 里
+// 故意写着 cp.exec(userCmd)、execFileSync(...) 这类「反面样本」字符串，
+// 它们是测试语料而非真实漏洞。放宽豁免（如按目录名豁免整个 tests/）会让
+// 真正的漏洞藏进测试目录，反而破坏归零纪律的价值。
+function isDogfoodExempt(absPath, root) {
+  const base = path.basename(absPath);
+  if (base !== 'test.js' && base !== 'smoke-cli.js') return false;
+  const rel = path.relative(root, absPath).split(path.sep).join('/');
+  // 只豁免仓库根目录下的这两个文件，不豁免任何子目录里的同名文件
+  return rel === 'test.js' || rel === 'scripts/smoke-cli.js';
+}
+
 // ---------- 目录递归扫描 ----------
-function walk(dir, out) {
+function walk(dir, out, extSet) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
   catch { return; }
@@ -217,17 +308,19 @@ function walk(dir, out) {
     const abs = path.join(dir, e.name);
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name)) continue;
-      walk(abs, out);
+      walk(abs, out, extSet);
     } else if (e.isFile()) {
       const ext = path.extname(e.name).toLowerCase();
-      if (SUPPORTED_EXT.has(ext)) out.push(abs);
+      if (extSet.has(ext)) out.push(abs);
     }
   }
 }
 
-function scanDir(root) {
+function scanDir(root, extensions, exempt) {
+  // 每次调用用局部集合，绝不污染模块级 SUPPORTED_EXT
+  const extSet = extensions && extensions.length ? new Set(extensions) : SUPPORTED_EXT;
   const files = [];
-  walk(root, files);
+  walk(root, files, extSet);
   const allIssues = [];
   let totalLines = 0;
   let scannedFiles = 0;
@@ -236,6 +329,7 @@ function scanDir(root) {
     try { src = fs.readFileSync(f, 'utf8'); }
     catch { continue; }
     if (Buffer.byteLength(src, 'utf8') > MAX_FILE_BYTES) continue;
+    if (exempt && exempt(f)) continue;
     const issues = scanText(src);
     for (const it of issues) allIssues.push({ file: f, ...it });
     totalLines += src.split('\n').length;
@@ -319,9 +413,14 @@ function printHelp() {
 function run(argv) {
   const opts = parseArgs(argv);
 
+  // --ext 只构造本次调用的局部扩展名集合，不再改写模块级状态
+  let extList = null;
   if (opts.ext) {
-    SUPPORTED_EXT.clear();
-    for (const e of opts.ext.split(',')) SUPPORTED_EXT.add('.' + e.trim().replace(/^\./, ''));
+    extList = opts.ext.split(',').map(e => '.' + e.trim().replace(/^\./, '')).filter(e => e !== '.');
+    if (!extList.length) {
+      console.error('[secscan] --ext 未给出有效扩展名');
+      process.exit(2);
+    }
   }
 
   let stat;
@@ -335,7 +434,7 @@ function run(argv) {
     process.exit(2);
   }
 
-  const { issues, files, lines } = scanDir(opts.root);
+  const { issues, files, lines } = scanDir(opts.root, extList, (f) => isDogfoodExempt(f, opts.root));
   const score = computeScore(issues, lines);
 
   const counts = { high: 0, medium: 0, low: 0 };
@@ -377,4 +476,4 @@ if (require.main === module) {
   run(process.argv.slice(2));
 }
 
-module.exports = { scanText, scanDir, computeScore, tokenize, parseArgs, run, RULES, RE, VERSION, SUPPORTED_EXT };
+module.exports = { scanText, scanDir, computeScore, tokenize, parseArgs, run, RULES, RE, VERSION, SUPPORTED_EXT, DEFAULT_EXTENSIONS, isDogfoodExempt };
