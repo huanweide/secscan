@@ -1,3 +1,11 @@
+<!-- badges -->
+[![License](https://img.shields.io/github/license/huanweide/secscan)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/huanweide/secscan)](https://github.com/huanweide/secscan/stargazers)
+[![Engineering Health Family](https://img.shields.io/badge/Engineering%20Health%20Family-18%20axes-22c55e)](https://github.com/huanweide/family-showcase)
+<!-- /badges -->
+
+**🔧 Part of the [Engineering Health Family](https://github.com/huanweide/family-showcase)** (18 zero-dependency checkup axes). Standalone tool — see [doctors](https://github.com/huanweide/doctors) (monorepo) and [enghealth](https://github.com/huanweide/enghealth) (unified runner).
+
 # secscan
 
 零依赖、单文件、开箱即用的 **JS/TS 安全反模式静态扫描 CLI**。
