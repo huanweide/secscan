@@ -13,11 +13,13 @@
 
 **🔧 Part of the [Engineering Health Family](https://github.com/huanweide/family-showcase)** (18 zero-dependency checkup axes). Standalone tool — see [doctors](https://github.com/huanweide/doctors) (monorepo) and [enghealth](https://github.com/huanweide/enghealth) (unified runner).
 
+> English: 暂未提供
+
 # secscan
 
 零依赖、单文件、开箱即用的 **JS/TS 安全反模式静态扫描 CLI**。
 
-代码健康 family 第七轴（安全反模式）。与 `devdoctor`（只扫明文密钥）互补：`devdoctor` 查"密码泄露"，`secscan` 查"不安全的 API 用法"。
+与 `devdoctor`（只扫明文密钥）互补：`devdoctor` 查"密码泄露"，`secscan` 查"不安全的 API 用法"。
 
 ## 为什么需要它
 
@@ -152,7 +154,7 @@ MIT
 
 ## 作者
 
-由 **ReTr · huanweide** 维护 · [GitHub 主页](https://github.com/huanweide)
+由 **huanweide** 维护 · [GitHub 主页](https://github.com/huanweide)
 
 ## S2 / S7 按「实参形态」判严重度，而不是「首字符是不是引号」
 
